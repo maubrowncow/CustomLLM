@@ -1,3 +1,10 @@
+# Sensitive and private data (never push these!)
+/data/instructions/
+/data/knowledge_base/
+/storage/
+/.chroma/
+/PRODUCT_SPEC.md
+
 # dependencies
 /node_modules
 /.pnp
@@ -34,4 +41,11 @@ next-env.d.ts
 
 # knowledge base
 /knowledge_base/*
-!/knowledge_base/.gitkeep 
+!/knowledge_base/.gitkeep
+
+# Ignore custom instructions and knowledge base
+/data/instructions/
+/data/knowledge_base/
+# Ignore vector store and index files
+/storage/
+/.chroma/ 
