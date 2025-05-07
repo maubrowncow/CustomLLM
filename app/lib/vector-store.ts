@@ -1,202 +1,198 @@
-import { OpenAIEmbedding, Document, VectorStoreIndex, storageContextFromDefaults, StorageContext, MetadataMode } from "llamaindex";
+// Vector store implementation using LlamaIndex
+
 import fs from 'fs/promises';
 import path from 'path';
+import { Document, MetadataMode } from '@llamaindex/core/schema';
+import { SimpleVectorStore } from 'llamaindex/vector-store';
+import { VectorStoreQueryMode } from '@llamaindex/core/vector-store';
+import { Settings } from '@llamaindex/core/global';
+import { OpenAIEmbedding } from '@llamaindex/openai';
 
-// Configuration types
-interface VectorStoreConfig {
-  chunkSize: number;
-  chunkOverlap: number;
-  embeddingModel: string;
-  searchThreshold: number;
-  maxResults: number;
+// Create an embedding model instance that we'll use directly
+const embeddingModel = new OpenAIEmbedding({ model: 'text-embedding-3-small', dimensions: 1536 });
+
+// Helper function to ensure embedding model is set globally
+function ensureEmbeddingModel() {
+  Settings.embedModel = embeddingModel;
+  console.log('Embedding model set in Settings');
 }
 
-interface DocumentMetadata {
-  source?: string;
-  timestamp?: string;
-  [key: string]: any;
-}
+let vectorStore: SimpleVectorStore | null = null;
 
-interface SearchResult {
-  text: string;
-  score: number;
-  metadata?: DocumentMetadata;
-}
-
-// Default configuration
-const DEFAULT_CONFIG: VectorStoreConfig = {
-  chunkSize: 1000,
-  chunkOverlap: 200,
-  embeddingModel: "text-embedding-3-small",
-  searchThreshold: 0.5, // Lower threshold for better recall
-  maxResults: 10 // Increase max results
-};
-
-// Initialize OpenAI embedding model
-const embeddingModel = new OpenAIEmbedding({
-  apiKey: process.env.OPENAI_API_KEY,
-  model: DEFAULT_CONFIG.embeddingModel
-});
-
-let vectorStore: VectorStoreIndex | null = null;
-let storageContext: StorageContext | null = null;
-
-// Load documents from knowledge base directory
-async function loadDocumentsFromKnowledgeBase(): Promise<Document[]> {
-  const knowledgeBaseDir = path.join(process.cwd(), 'data', 'knowledge_base');
-  const documents: Document[] = [];
-
-  try {
-    console.log('Loading documents from:', knowledgeBaseDir);
-    const files = await fs.readdir(knowledgeBaseDir);
-    console.log('Found files:', files);
-    
-    for (const file of files) {
-      if (file.endsWith('.meta.json')) continue;
-      
-      const filePath = path.join(knowledgeBaseDir, file);
-      console.log('Loading file:', filePath);
-      
-      const content = await fs.readFile(filePath, 'utf-8');
-      console.log(`Loaded ${file} (${content.length} bytes)`);
-      
-      documents.push(new Document({
-        text: content,
-        metadata: {
-          source: file,
-          timestamp: new Date().toISOString()
-        }
-      }));
+// Helper: Chunk text by paragraphs (double newlines)
+function chunkText(text: string, chunkSize: number = 800): string[] {
+  const paragraphs = text.split(/\n\s*\n/);
+  const chunks: string[] = [];
+  let current = '';
+  for (const para of paragraphs) {
+    if ((current + '\n\n' + para).length > chunkSize && current) {
+      chunks.push(current.trim());
+      current = para;
+    } else {
+      current += (current ? '\n\n' : '') + para;
     }
-    
-    console.log(`Loaded ${documents.length} documents`);
-  } catch (error) {
-    console.error('Error loading documents from knowledge base:', error);
-    throw error; // Re-throw to handle in caller
   }
-
-  return documents;
+  if (current) chunks.push(current.trim());
+  return chunks;
 }
 
-// Initialize vector store
-async function initializeVectorStore(): Promise<VectorStoreIndex> {
-  if (vectorStore) {
-    console.log('Using existing vector store');
-    return vectorStore;
+export async function initializeVectorStore() {
+  ensureEmbeddingModel();
+  if (!vectorStore) {
+    const persistDir = path.join(process.cwd(), 'data', 'vector_store');
+    await fs.mkdir(persistDir, { recursive: true });
+    vectorStore = await SimpleVectorStore.fromPersistDir(persistDir, embeddingModel);
   }
-  
-  console.log('Initializing new vector store');
-  
-  if (!storageContext) {
-    console.log('Creating storage context');
-    storageContext = await storageContextFromDefaults({ persistDir: "./storage" });
-  }
-  
-  // Load existing documents
-  console.log('Loading documents from knowledge base');
-  const documents = await loadDocumentsFromKnowledgeBase();
-  
-  if (documents.length === 0) {
-    console.warn('No documents found in knowledge base');
-  }
-  
-  console.log('Creating vector store with documents');
-  vectorStore = await VectorStoreIndex.fromDocuments(documents, {
-    storageContext
-  });
-  
-  console.log('Vector store initialized');
   return vectorStore;
 }
 
-// Add documents to vector store
-export async function addDocuments(text: string, metadata: DocumentMetadata = {}) {
+// Index all files in the knowledge base directory
+export async function indexKnowledgeBase() {
+  ensureEmbeddingModel();
+  const kbDir = path.join(process.cwd(), 'data', 'knowledge_base');
+  
   try {
+    const files = await fs.readdir(kbDir);
     const store = await initializeVectorStore();
-    const document = new Document({
-      text,
-      metadata: {
-        ...metadata,
-        timestamp: new Date().toISOString()
-      }
-    });
     
-    console.log('Adding document to vector store');
-    await store.insert(document);
-    console.log('Document added successfully');
+    for (const file of files) {
+      const filePath = path.join(kbDir, file);
+      const stat = await fs.stat(filePath);
+      if (!stat.isFile()) continue;
+      
+      console.log(`Processing ${file}...`);
+      const content = await fs.readFile(filePath, 'utf8');
+      const chunks = chunkText(content);
+      console.log(`Indexing ${file} with ${chunks.length} chunks`);
+      
+      // Create documents with pre-computed embeddings
+      const docs = [];
+      for (const chunk of chunks) {
+        try {
+          const embedding = await embeddingModel.getTextEmbedding(chunk);
+          const doc = new Document({
+            text: chunk,
+            metadata: { filename: file },
+            embedding: embedding
+          });
+          docs.push(doc);
+        } catch (err) {
+          console.error(`Error embedding chunk: ${err}`);
+        }
+      }
+      
+      console.log(`Adding ${docs.length} documents to vector store`);
+      await store.add(docs);
+      console.log(`Successfully added documents from ${file}`);
+    }
+    
+    await store.persist();
+    console.log("Knowledge base indexed successfully");
     return true;
   } catch (error) {
-    console.error("Error adding documents:", error);
-    throw new Error("Failed to add documents to vector store");
-  }
-}
-
-// Search for similar documents
-export async function similaritySearch(
-  query: string,
-  config: Partial<VectorStoreConfig> = {}
-): Promise<SearchResult[]> {
-  try {
-    console.log('Performing similarity search for:', query);
-    const store = await initializeVectorStore();
-    const finalConfig = { ...DEFAULT_CONFIG, ...config };
-    
-    const retriever = store.asRetriever();
-    retriever.similarityTopK = finalConfig.maxResults;
-    
-    console.log('Retrieving results');
-    const results = await retriever.retrieve(query);
-    console.log(`Found ${results.length} results`);
-    
-    const processedResults = results
-      .map(result => ({
-        text: result.node.getContent(MetadataMode.NONE),
-        score: result.score || 0,
-        metadata: result.node.metadata as DocumentMetadata
-      }))
-      .filter(result => result.score >= finalConfig.searchThreshold);
-    
-    console.log(`Returning ${processedResults.length} results after threshold filtering`);
-    return processedResults;
-  } catch (error) {
-    console.error("Error performing similarity search:", error);
-    throw new Error("Failed to perform similarity search");
-  }
-}
-
-// Additional utility functions for document management
-export async function deleteDocument(documentId: string): Promise<void> {
-  try {
-    const store = await initializeVectorStore();
-    // Note: LlamaIndex doesn't support direct node deletion
-    // We'll need to implement a different approach for document deletion
-    console.log(`Document deletion not supported: ${documentId}`);
-  } catch (error) {
-    console.error("Error deleting document:", error);
+    console.error("Error in indexKnowledgeBase:", error);
     throw error;
   }
 }
 
-export async function updateDocument(
-  documentId: string,
-  text: string,
-  metadata: Partial<DocumentMetadata>
-): Promise<void> {
-  try {
-    const store = await initializeVectorStore();
-    const document = new Document({
-      text,
-      metadata: {
-        ...metadata,
-        updatedAt: new Date().toISOString()
-      }
+export async function addDocument(filePath: string, content: string) {
+  ensureEmbeddingModel();
+  const store = await initializeVectorStore();
+  const chunks = chunkText(content);
+  
+  const docs = [];
+  for (const chunk of chunks) {
+    const embedding = await embeddingModel.getTextEmbedding(chunk);
+    const doc = new Document({ 
+      text: chunk, 
+      metadata: { filePath },
+      embedding: embedding
+    });
+    docs.push(doc);
+  }
+  
+  await store.add(docs);
+  await store.persist();
+}
+
+export async function similaritySearch(query: string, k: number = 5) {
+  ensureEmbeddingModel();
+  const store = await initializeVectorStore();
+  
+  // Get embedding for query
+  const queryEmbedding = await embeddingModel.getTextEmbedding(query);
+  
+  const results = await store.query({
+    queryEmbedding: queryEmbedding,
+    queryStr: query,
+    similarityTopK: k,
+    mode: VectorStoreQueryMode.DEFAULT
+  });
+  
+  return results.nodes?.map(node => ({
+    text: node.getContent(MetadataMode.ALL),
+    metadata: node.metadata || {}
+  })) || [];
+}
+
+export async function deleteDocument(filePath: string) {
+  ensureEmbeddingModel();
+  const store = await initializeVectorStore();
+  await store.delete(filePath);
+  await store.persist();
+}
+
+/**
+ * Search specifically for author quotes in the knowledge base
+ * This function is optimized to find authors and their quotes
+ */
+export async function searchAuthorsAndQuotes(k: number = 10) {
+  ensureEmbeddingModel();
+  const store = await initializeVectorStore();
+  
+  // Use author-specific queries for better retrieval
+  const authorQueries = [
+    "list all authors",
+    "author quotes",
+    "who are the authors",
+    "relevant author quotes",
+    "casper ter kuile quote",
+    "will storr quote",
+    "simone stolzoff quote",
+    "franklin veaux quote",
+    "jason fried quote"
+  ];
+  
+  // Collect all unique results
+  const allResults = new Map();
+  
+  for (const query of authorQueries) {
+    console.log(`Searching for: ${query}`);
+    const queryEmbedding = await embeddingModel.getTextEmbedding(query);
+    
+    const results = await store.query({
+      queryEmbedding: queryEmbedding,
+      queryStr: query,
+      similarityTopK: k,
+      mode: VectorStoreQueryMode.DEFAULT
     });
     
-    // Note: LlamaIndex doesn't support direct node updates
-    // We'll need to implement a different approach for document updates
-    console.log(`Document update not supported: ${documentId}`);
-  } catch (error) {
-    console.error("Error updating document:", error);
-    throw error;
+    if (results.nodes) {
+      for (const node of results.nodes) {
+        // Use node ID as key to avoid duplicates
+        if (!allResults.has(node.id_)) {
+          allResults.set(node.id_, {
+            text: node.getContent(MetadataMode.ALL),
+            metadata: node.metadata || {}
+          });
+        }
+      }
+    }
   }
+  
+  console.log(`Found ${allResults.size} unique author/quote entries`);
+  return Array.from(allResults.values());
 }
+
+// Do NOT auto-index on module load. Call indexKnowledgeBase() explicitly from a setup script or server entry.
+// indexKnowledgeBase().catch(e => console.error('Error indexing knowledge base:', e));

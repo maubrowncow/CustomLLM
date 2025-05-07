@@ -1,9 +1,12 @@
 # Sensitive and private data (never push these!)
 /data/instructions/
 /data/knowledge_base/
-/storage/
-/.chroma/
-/PRODUCT_SPEC.md
+/instructions/
+/knowledge_base/
+**/instructions/
+**/knowledge_base/
+PRODUCT_SPEC.md
+**/PRODUCT_SPEC.md
 
 # dependencies
 /node_modules

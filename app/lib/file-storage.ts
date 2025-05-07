@@ -22,6 +22,31 @@ export async function saveInstructions(instructions: string): Promise<void> {
   // Also save as latest
   const latestPath = path.join(INSTRUCTIONS_DIR, 'latest.txt');
   await fs.promises.writeFile(latestPath, instructions, 'utf-8');
+
+  // Ensure archive directory exists
+  const archiveDir = path.join(INSTRUCTIONS_DIR, 'archive');
+  if (!fs.existsSync(archiveDir)) {
+    fs.mkdirSync(archiveDir, { recursive: true });
+  }
+
+  // Move all old instructions_*.txt files (except latest.txt and the new one) to archive
+  const files = await fs.promises.readdir(INSTRUCTIONS_DIR);
+  await Promise.all(
+    files
+      .filter(f => f.startsWith('instructions_') && f !== filename && f !== 'latest.txt')
+      .map(async f => {
+        const oldPath = path.join(INSTRUCTIONS_DIR, f);
+        const newPath = path.join(archiveDir, f);
+        try {
+          // Check if file exists before trying to move it
+          await fs.promises.access(oldPath);
+          await fs.promises.rename(oldPath, newPath);
+        } catch (error: any) {
+          // Skip if file doesn't exist or can't be accessed
+          console.warn(`Skipping archival of ${f}: ${error?.message || 'Unknown error'}`);
+        }
+      })
+  );
 }
 
 export async function getLatestInstructions(): Promise<string> {
@@ -61,21 +86,24 @@ export async function getKnowledgeBaseDocument(filename: string): Promise<{
   content: string;
   metadata: Record<string, any>;
 }> {
-  const filepath = path.join(KNOWLEDGE_BASE_DIR, filename);
+  const filepath = path.join(process.cwd(), 'data', 'knowledge_base', filename);
   const metadataPath = `${filepath}.meta.json`;
-  
   try {
-    const [content, metadataContent] = await Promise.all([
-      fs.promises.readFile(filepath, 'utf-8'),
-      fs.promises.readFile(metadataPath, 'utf-8')
-    ]);
-    
+    const content = await fs.promises.readFile(filepath, 'utf-8');
+    let metadata = {};
+    try {
+      const metadataContent = await fs.promises.readFile(metadataPath, 'utf-8');
+      metadata = JSON.parse(metadataContent);
+    } catch (metaError) {
+      // Metadata file missing or corrupted, fallback to empty object
+      metadata = {};
+    }
     return {
       content,
-      metadata: JSON.parse(metadataContent)
+      metadata
     };
   } catch (error) {
-    console.error(`Error reading knowledge base document ${filename}:`, error);
+    console.error(`Error reading knowledge base document ${filename} at path ${filepath}:`, error);
     throw error;
   }
 }

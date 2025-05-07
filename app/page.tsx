@@ -44,6 +44,7 @@ import {
 } from '@chakra-ui/react';
 import { FiSettings, FiSend, FiFile, FiInfo, FiUpload, FiTrash2, FiFolder, FiFileText } from 'react-icons/fi';
 import ReactMarkdown from 'react-markdown';
+import Link from 'next/link';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -59,29 +60,40 @@ interface Document {
 }
 
 export default function Home() {
-  const [messages, setMessages] = useState<Message[]>(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('messages');
-      return saved ? JSON.parse(saved) : [];
-    }
-    return [];
-  });
+  const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isIndexing, setIsIndexing] = useState(false);
   const { isOpen, onOpen, onClose } = useDisclosure();
   const { isOpen: isUploadOpen, onOpen: onUploadOpen, onClose: onUploadClose } = useDisclosure2();
-  const [instructions, setInstructions] = useState(() => {
-    if (typeof window !== 'undefined') {
-      return localStorage.getItem('instructions') || '';
-    }
-    return '';
-  });
+  const [instructions, setInstructions] = useState('');
   const [documents, setDocuments] = useState<Document[]>([]);
   const [uploadProgress, setUploadProgress] = useState(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const toast = useToast();
+  const [previewContent, setPreviewContent] = useState<string | null>(null);
+  const [previewTitle, setPreviewTitle] = useState<string>('');
+  const { isOpen: isPreviewOpen, onOpen: onPreviewOpen, onClose: onPreviewClose } = useDisclosure();
+
+  // Load saved messages and instructions from localStorage only on client side
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const savedMessages = localStorage.getItem('messages');
+      if (savedMessages) {
+        try {
+          setMessages(JSON.parse(savedMessages));
+        } catch (e) {
+          console.error('Error parsing saved messages:', e);
+        }
+      }
+      
+      const savedInstructions = localStorage.getItem('instructions');
+      if (savedInstructions) {
+        setInstructions(savedInstructions);
+      }
+    }
+  }, []);
 
   // Color mode values
   const bgColor = useColorModeValue('white', 'gray.800');
@@ -89,8 +101,11 @@ export default function Home() {
   const userMessageBg = useColorModeValue('blue.500', 'blue.400');
   const assistantMessageBg = useColorModeValue('gray.100', 'gray.700');
 
+  // Save messages to localStorage when they change
   useEffect(() => {
-    localStorage.setItem('messages', JSON.stringify(messages));
+    if (typeof window !== 'undefined' && messages.length > 0) {
+      localStorage.setItem('messages', JSON.stringify(messages));
+    }
   }, [messages]);
 
   useEffect(() => {
@@ -217,16 +232,34 @@ export default function Home() {
     }
   };
 
-  const handleDeleteDocument = async (path: string) => {
+  const handlePreviewDocument = async (path: string, name: string) => {
     try {
-      const response = await fetch(`/api/documents?path=${encodeURIComponent(path)}`, {
+      const response = await fetch(`/api/documents?filename=${encodeURIComponent(name)}`);
+      if (response.ok) {
+        const data = await response.json();
+        setPreviewContent(data.content);
+        setPreviewTitle(name);
+        onPreviewOpen();
+      } else {
+        setPreviewContent('Failed to load document content.');
+        setPreviewTitle(name);
+        onPreviewOpen();
+      }
+    } catch (error) {
+      setPreviewContent('Error loading document content.');
+      setPreviewTitle(name);
+      onPreviewOpen();
+    }
+  };
+
+  const handleDeleteDocument = async (path: string, name: string) => {
+    try {
+      const response = await fetch(`/api/documents?filename=${encodeURIComponent(name)}`, {
         method: 'DELETE',
       });
-
       if (!response.ok) {
         throw new Error('Failed to delete document');
       }
-
       toast({
         title: 'Success',
         description: 'Document deleted successfully',
@@ -234,8 +267,6 @@ export default function Home() {
         duration: 5000,
         isClosable: true,
       });
-
-      // Refresh the documents list after deletion
       await fetchDocuments();
     } catch (error) {
       console.error('Error deleting document:', error);
@@ -302,6 +333,18 @@ export default function Home() {
 
   return (
     <Box h="100vh" bg={useColorModeValue('gray.50', 'gray.900')}>
+      <div className="flex justify-between items-center p-4 border-b">
+        <h1 className="text-xl font-semibold">Vector RAG Chat</h1>
+        <div className="flex space-x-4">
+          <Link href="/document-viewer" className="text-blue-500 hover:text-blue-700">
+            Document Viewer
+          </Link>
+          <Link href="/count-test" className="text-blue-500 hover:text-blue-700">
+            Word Counter
+          </Link>
+        </div>
+      </div>
+      
       <Container maxW="container.xl" h="full" py={4}>
         <Flex direction="column" h="full" bg={bgColor} borderRadius="xl" boxShadow="lg" overflow="hidden">
           {/* Header */}
@@ -358,31 +401,53 @@ export default function Home() {
           {/* Input */}
           <Box p={4} borderTop="1px" borderColor={borderColor} bg={bgColor}>
             <form onSubmit={handleSubmit}>
-              <HStack>
-                <Input
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  placeholder="Type your message..."
-                  disabled={isLoading}
-                  size="lg"
-                  borderRadius="full"
-                  bg={useColorModeValue('white', 'gray.700')}
-                  _focus={{
-                    boxShadow: 'outline',
-                  }}
-                />
+              <Flex direction="column">
+                <Box position="relative">
+                  <Textarea
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    placeholder="Type your message..."
+                    disabled={isLoading}
+                    size="md"
+                    minHeight="60px"
+                    maxHeight="300px"
+                    resize="vertical"
+                    borderRadius="lg"
+                    bg={useColorModeValue('white', 'gray.700')}
+                    mb={2}
+                    _focus={{
+                      boxShadow: "0 0 0 1px #3182ce",
+                      borderColor: "blue.500"
+                    }}
+                    onKeyDown={(e) => {
+                      // Send on Enter, allow Shift+Enter for new line
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        handleSubmit(e);
+                      }
+                    }}
+                  />
+                  <Text 
+                    position="absolute" 
+                    right="2" 
+                    bottom="3" 
+                    fontSize="xs" 
+                    color="gray.500"
+                  >
+                    Press Enter to send, Shift+Enter for new line
+                  </Text>
+                </Box>
                 <Button
                   type="submit"
                   colorScheme="blue"
                   isLoading={isLoading}
                   rightIcon={<FiSend />}
-                  size="lg"
-                  borderRadius="full"
+                  alignSelf="flex-end"
                   px={8}
                 >
                   Send
                 </Button>
-              </HStack>
+              </Flex>
             </form>
           </Box>
         </Flex>
@@ -442,7 +507,7 @@ export default function Home() {
                       <List spacing={3}>
                         {documents.map((doc) => (
                           <ListItem
-                            key={doc.path}
+                            key={doc.path || doc.name}
                             p={3}
                             borderWidth="1px"
                             borderRadius="md"
@@ -455,18 +520,28 @@ export default function Home() {
                               <VStack align="start" spacing={0}>
                                 <Text fontWeight="medium">{doc.name}</Text>
                                 <Text fontSize="sm" color="gray.500">
-                                  {doc.type} • {formatFileSize(doc.size)}
+                                  {formatFileSize(doc.size)} • {doc.type || 'Unknown'}
                                 </Text>
                               </VStack>
                             </HStack>
-                            <IconButton
-                              aria-label="Delete document"
-                              icon={<FiTrash2 />}
-                              size="sm"
-                              variant="ghost"
-                              colorScheme="red"
-                              onClick={() => handleDeleteDocument(doc.path)}
-                            />
+                            <HStack>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                colorScheme="blue"
+                                onClick={() => handlePreviewDocument(doc.path, doc.name)}
+                              >
+                                View
+                              </Button>
+                              <IconButton
+                                aria-label="Delete document"
+                                icon={<FiTrash2 />}
+                                size="sm"
+                                variant="ghost"
+                                colorScheme="red"
+                                onClick={() => handleDeleteDocument(doc.path, doc.name)}
+                              />
+                            </HStack>
                           </ListItem>
                         ))}
                       </List>
@@ -510,6 +585,27 @@ export default function Home() {
             <Button variant="ghost" mr={3} onClick={onUploadClose}>
               Cancel
             </Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+
+      {/* Preview Modal */}
+      <Modal isOpen={isPreviewOpen} onClose={onPreviewClose} size="2xl" scrollBehavior="inside">
+        <ModalOverlay />
+        <ModalContent>
+          <ModalHeader>{previewTitle}</ModalHeader>
+          <ModalCloseButton />
+          <ModalBody
+            maxHeight="60vh"
+            overflowY="auto"
+            whiteSpace="pre-wrap"
+            px={6}
+            py={4}
+          >
+            {previewContent}
+          </ModalBody>
+          <ModalFooter>
+            <Button onClick={onPreviewClose}>Close</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
